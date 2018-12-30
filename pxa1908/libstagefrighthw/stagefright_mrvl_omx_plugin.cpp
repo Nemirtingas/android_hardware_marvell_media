@@ -19,15 +19,13 @@
 #include <media/stagefright/foundation/ADebug.h> /* Define CHECK_EQ */
 #include "OMX_IppDef.h"
 #include <binder/IMemory.h>
+#include <binder/MemoryHeapBase.h>
 #include <utils/RefBase.h>
 #include <sys/ioctl.h>
 #include <cutils/properties.h>
 #ifdef USE_ION
-#include <android/ion/ion.h>
-#include <android/ion/pxa/pxa_ion.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <mvmem.h>
+#include <linux/ion.h>
 #endif
 
 #ifdef LOG_TAG
@@ -53,67 +51,70 @@
 
 #include <exception>
 
-static struct __libMrvlOmx
+#include <MrvlOmx.h>
+#include <gpu_csc.h>
+#include <gralloc_priv.h>
+#include <gc_gralloc_gr.h>
+#include <mrvl_pxl_formats.h>
+
+struct OMX_METADATAPARAM
 {
-    void* const _lib;
-    OMX_ERRORTYPE (*const OMX_Init)();
-    OMX_ERRORTYPE (*const OMX_Deinit)();
-    OMX_ERRORTYPE (*const OMX_ComponentNameEnum)(OMX_STRING, OMX_U32, OMX_U32);
-    OMX_ERRORTYPE (*const OMX_GetHandle)(OMX_HANDLETYPE, OMX_STRING, OMX_PTR, OMX_CALLBACKTYPE *);
-    OMX_ERRORTYPE (*const OMX_FreeHandle)(OMX_HANDLETYPE);
-    OMX_ERRORTYPE (*const OMX_GetRolesOfComponent)(OMX_STRING, OMX_U32 *, OMX_U8 **);
-
-    __libMrvlOmx():_lib(dlopen("libMrvlOmx.so", RTLD_NOW)),
-        OMX_Init               ((OMX_ERRORTYPE (*)())dlsym(_lib, "OMX_Init")),
-        OMX_Deinit             ((OMX_ERRORTYPE (*)())dlsym(_lib, "OMX_Deinit")),
-        OMX_ComponentNameEnum  ((OMX_ERRORTYPE (*)(OMX_STRING, OMX_U32, OMX_U32))dlsym(_lib, "OMX_ComponentNameEnum")),
-        OMX_GetHandle          ((OMX_ERRORTYPE (*)(OMX_HANDLETYPE, OMX_STRING, OMX_PTR, OMX_CALLBACKTYPE *))dlsym(_lib, "OMX_GetHandle")),
-        OMX_FreeHandle         ((OMX_ERRORTYPE (*)(OMX_HANDLETYPE))dlsym(_lib, "OMX_FreeHandle")),
-        OMX_GetRolesOfComponent((OMX_ERRORTYPE (*)(OMX_STRING, OMX_U32 *, OMX_U8 **))dlsym(_lib, "OMX_GetRolesOfComponent"))
-    {
-        if( !_lib ||
-            !OMX_Init || !OMX_Deinit || !OMX_ComponentNameEnum ||
-            !OMX_GetHandle || !OMX_FreeHandle || !OMX_GetRolesOfComponent )
-        {
-            exit(-9999);
-        }
-    }
-} libMrvlOmx;
-
-struct gcuContext;
-
-static struct __libgcu
-{
-    void* const _lib;
-    void (*const gcuDestroyContext)(gcuContext**);
-    void (*const gcuTerminate)();
-    void (*const gcuDestroyBuffer)(gcuContext**, int);
-
-    __libgcu():_lib(dlopen("libgcu.so", RTLD_NOW)),
-        gcuDestroyContext((void(*)(gcuContext**))dlsym(_lib, "gcuDestroyContext")),
-        gcuTerminate     ((void(*)())dlsym(_lib, "gcuTerminate")),
-        gcuDestroyBuffer ((void(*)(gcuContext**, int))dlsym(_lib, "gcuDestroyBuffer"))
-    {
-    }
-
-
-
-} libgcu;
-
-
-struct struc_1
-{
-  OMX_BUFFERHEADERTYPE *pBuffer;
+  int nSize;
   int field_4;
-  OMX_BUFFERHEADERTYPE bufferHeader;
+  int field_8;
+  int field_C;
+  int field_10;
+  int width;
+  int height;
+  OMX_COLOR_FORMATTYPE format;
+  int field_20;
+  int field_24;
+  int field_28;
+  int field_2C;
+  int field_30;
+  int field_34;
+  int field_38;
+  int field_3C;
+  int field_40;
+  int field_44;
+  int field_48;
+  int field_4C;
   int field_50;
   int field_54;
-  int id;
+  int field_58;
   int field_5C;
   int field_60;
   int field_64;
   int field_68;
   int field_6C;
+  int field_70;
+  int field_74;
+  int field_78;
+  int field_7C;
+  int field_80;
+  int field_84;
+  int field_88;
+  int field_8C;
+  int field_90;
+  int field_94;
+  int field_98;
+  int field_9C;
+  int field_A0;
+  int field_A4;
+};
+
+
+struct struc_1
+{
+    OMX_BUFFERHEADERTYPE *pBuffer;
+    int field_4;
+    OMX_BUFFERHEADERTYPE bufferHeader;
+    android::sp<android::IMemoryHeap> memHeap;
+    int field_5C;
+    int field_60;
+    int field_64;
+    GCUSurface surface;
+    int field_6C;
 };
 
 typedef struct{
@@ -121,12 +122,290 @@ typedef struct{
     OMX_U8 ComponentName[128];
     OMX_CALLBACKTYPE  InternalCallBack;
     int field_E4;
-    struct gcuContext *context;
+    GCUContext context;
     int field_EC;
     struc_1 buffers[32];
     int numBuffers;
     int field_EF4;
 }IppOmxCompomentWrapper_t;
+
+typedef struct _gcBufferAttr
+{
+  GCUint width;
+  GCUint height;
+  GCUint left;
+  GCUint right;
+  GCUint top;
+  GCUint bottom;
+  GCUVirtualAddr Vaddr;
+  GCUPhysicalAddr Paddr;
+  GCUSurface *surface;
+} gcBufferAttr;
+
+struct libstock
+{
+    int offset;
+    void *_lib;
+    OMX_ERRORTYPE (*storeMetaDataInBufferHandling)(IppOmxCompomentWrapper_t *hComponent, OMX_BUFFERHEADERTYPE_IPPEXT *pBuffer);
+
+    libstock():_lib(dlopen("libstagefrighthw.so", RTLD_NOW))
+    {
+        offset = (int)dlsym(_lib, "_ZN7android19OMXMRVLCodecsPlugin21makeComponentInstanceEPKcPK16OMX_CALLBACKTYPEPvPP17OMX_COMPONENTTYPE")-0x1ae8;
+        *(int*)&storeMetaDataInBufferHandling = 0x2014 + offset;
+    }
+
+    static libstock& Inst()
+    {
+        static libstock lib;
+        return lib;
+    }
+};
+
+
+#define IPPOMX_COMPONENT(x) ((IppOmxCompomentWrapper_t*)(x))
+#define IPPOMX_PAPPLICATION(x) (IppOmxCompomentWrapper_t*)((OMX_COMPONENTTYPE*)(x))->pApplicationPrivate
+#define IPPOMX_PCOMPONENT(x) (IppOmxCompomentWrapper_t*)((OMX_COMPONENTTYPE*)(x))->pComponentPrivate
+
+static OMX_ERRORTYPE gcu_csc(GCUContext context, gcBufferAttr src, GCU_FORMAT srcFormat, gcBufferAttr dst, GCU_FORMAT dstFormat)
+{
+    GCU_RECT srcRect;
+    GCU_RECT dstRect;
+    GCU_BLT_DATA bltDatas;
+    GCUSurface srcSurface;
+    OMX_ERRORTYPE err = (OMX_ERRORTYPE)0x80000000;
+
+    srcRect.top    = src.top;
+    srcRect.left   = src.left;
+    srcRect.bottom = src.bottom;
+    srcRect.right  = src.right;
+
+    dstRect.top    = dst.top;
+    dstRect.left   = dst.left;
+    dstRect.bottom = dst.bottom;
+    dstRect.right  = dst.right;
+
+    if( context == NULL )
+    {
+        ALOGE("GCU csc: invalid GCU context.");
+        return err;
+    }
+
+    srcSurface = _gcuCreatePreAllocBuffer(context, src.width, src.height, srcFormat, 1, src.Vaddr, 0, 0);
+    if( srcSurface == NULL )
+    {
+        ALOGE("GCU csc: prepare src surface failed.");
+        return err;
+    }
+
+    if( !*dst.surface )
+        *dst.surface = _gcuCreatePreAllocBuffer(context, dst.width, dst.height, dstFormat, 1, dst.Vaddr, 0, 0);
+
+    if( *dst.surface )
+    {
+        memset(&bltDatas, 0, sizeof(GCU_BLT_DATA));
+        bltDatas.pSrcSurface = srcSurface;
+        bltDatas.pSrcRect = &srcRect;
+
+        bltDatas.pDstSurface = *dst.surface;
+        bltDatas.pDstRect = &dstRect;
+
+        gcuBlit(context, &bltDatas);
+        gcuFinish(context);
+        err = OMX_ErrorNone;
+    }
+    else
+    {
+        ALOGE("GCU csc: prepare dst surface failed.");
+    }
+
+    _gcuDestroyBuffer(context, srcSurface);
+
+    return err;
+}
+
+extern OMX_ERRORTYPE storeMetaDataInBufferHandling(IppOmxCompomentWrapper_t *hComponent, OMX_BUFFERHEADERTYPE_IPPEXT *pBuffer)
+{
+
+    ALOGE("%s not reversed, falling back to stock function!", __func__);
+    return libstock::Inst().storeMetaDataInBufferHandling(hComponent, pBuffer);
+
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
+    OMX_ERRORTYPE error;
+    OMX_U32* buffer;
+    int gcFormat;
+    uint32_t dmaAddr;
+    int err;
+    GCU_INIT_DATA contextData;
+    GCU_CONTEXT_DATA contextData2;
+    // This is an OMX structure, but which one...
+    OMX_METADATAPARAM pComponentConfigStructure;
+    struc_1 *pstruc;
+    int size;
+    const char *gcuString;
+
+    if( hComponent == NULL )
+        return OMX_ErrorInvalidComponent;
+    if( hComponent->field_E4 != 1 )
+        return OMX_ErrorNone;
+    if( pBuffer->bufheader.nFilledLen == 0 )
+        return OMX_ErrorNone;
+
+    buffer = (OMX_U32*)pBuffer->bufheader.pBuffer;
+
+    for( int i = 0; i < 32; ++i )
+    {
+        pstruc = &hComponent->buffers[i];
+        if( pstruc->pBuffer == &pBuffer->bufheader )
+            break;
+        if( i == 31 )
+        {
+            ALOGE("Could not find corresponding input port buffer index!");
+            return OMX_ErrorUndefined;
+        }
+    }
+
+    pComponentConfigStructure.nSize = sizeof(OMX_METADATAPARAM);
+    pComponentConfigStructure.field_4 = 1;
+    pComponentConfigStructure.field_8 = 0;
+
+    error = pComponent->StandardComp.GetConfig(pComponent, OMX_IndexConfigMarvellStoreMetaData, &pComponentConfigStructure);
+    if( error != OMX_ErrorNone )
+    {
+        ALOGE("%s: GetConfig OMX_IndexConfigMarvellStoreMetaData failed, error = 0x%x", hComponent->ComponentName, error);
+        return error;
+    }
+
+    if( buffer[0] == 1 )
+    {
+        private_handle_t *gcHandle = private_handle_t::dynamicCast((native_handle_t*)buffer[1]);
+        gcFormat = gcHandle->format;
+        if( gcFormat == HAL_PIXEL_FORMAT_YCbCr_420_P || gcFormat == HAL_PIXEL_FORMAT_YCbCr_420_SP_MRVL )
+        {
+            pBuffer->bufheader.pBuffer = (OMX_U8*)gcHandle->base;
+            pBuffer->bufheader.nAllocLen = gcHandle->size;
+            pBuffer->bufheader.nFilledLen = gcHandle->size;
+            pBuffer->bufheader.nOffset = gcHandle->offset;
+            err = mvmem_get_dma_addr(gcHandle->master, &dmaAddr);
+            if( err < 0 )
+            {
+                ALOGE("failed to get VPUIO address through mvmem, return error:%d", err);
+                return OMX_ErrorHardware;
+            }
+            if( !strncmp((char*)hComponent->ComponentName, "OMX.MARVELL.VIDEO.", 18) )
+            {
+                pBuffer->nPhyAddr = dmaAddr;
+            }
+            if( pComponentConfigStructure.format != 0x7F000789 )
+                return OMX_ErrorNone;
+
+            switch( gcFormat )
+            {
+                case HAL_PIXEL_FORMAT_YCbCr_420_P:
+                    pComponentConfigStructure.format = OMX_COLOR_FormatYUV420Planar;
+                    ALOGI("%s: In kMetadataBufferTypeGrallocSource usage, the input color format is OMX_COLOR_FormatYUV420Planar.", hComponent->ComponentName);
+                    break;
+
+                case HAL_PIXEL_FORMAT_YCbCr_420_SP_MRVL:
+                    pComponentConfigStructure.format = OMX_COLOR_FormatYUV420SemiPlanar;
+                    ALOGI("%s: In kMetadataBufferTypeGrallocSource usage, the input color format is OMX_COLOR_FormatYUV420SemiPlanar.", hComponent->ComponentName);
+                    break;
+
+                default:
+                    ALOGE("%s: Unsupported hal pixel format: %d", hComponent->ComponentName, gcFormat);
+                    return OMX_ErrorNotImplemented;
+            }
+
+            error = pComponent->StandardComp.SetConfig(pComponent, OMX_IndexConfigMarvellStoreMetaData, &pComponentConfigStructure);
+            if( error != OMX_ErrorNone )
+                ALOGE("%s, SetConfig OMX_IndexConfigMarvellStoreMetaData failed, error = 0x%x", hComponent->ComponentName, error);
+
+            return error;
+        }
+
+        if( gcFormat == HAL_PIXEL_FORMAT_RGBA_8888 ||
+            gcFormat == HAL_PIXEL_FORMAT_RGBX_8888 ||
+            gcFormat == HAL_PIXEL_FORMAT_BGRA_8888 )
+        {
+            if( hComponent->context == NULL && hComponent->field_EC == 0 )
+            {
+                memset(&contextData, 0, sizeof(GCU_CONTEXT_DATA));
+                gcuInitialize(&contextData);
+
+                memset(&contextData2, 0, sizeof(GCU_CONTEXT_DATA));
+                hComponent->context = gcuCreateContext(&contextData2);
+
+                if( hComponent->context == NULL )
+                {
+                    ALOGE("GCU csc: create gcu context failed.");
+                    return OMX_ErrorHardware;
+                }
+
+                gcuString = gcuGetString(GCU_RENDERER);
+                if( gcuString && strstr(gcuString, "GC420") )
+                {
+                    hComponent->field_EC = 0;
+                    ALOGI("Input buffer format %d, will use GCU HW CSC for GC420 platform.");
+                }
+                else
+                {
+                    hComponent->field_EC = 1;
+                    ALOGI("Input buffer format %d, will use SOFTWARE CSC for NONE GC420 platform.");
+                }
+            }
+            if( pComponentConfigStructure.format == 0x7F000789 )
+            {
+                if( !strcmp((char*)hComponent->ComponentName, "OMX.MARVELL.VIDEO.HW.HANTROENCODER") )
+                {
+                    if( hComponent->field_EC )
+                    {
+                        pComponentConfigStructure.format = OMX_COLOR_FormatYUV420SemiPlanar;
+                        ALOGE("%s: In kMetadataBufferTypeGrallocSource usage, the input color format is OMX_COLOR_FormatYUV420SemiPlanar (after CSC).", hComponent->ComponentName);
+                    }
+                    else
+                    {
+                        pComponentConfigStructure.format = OMX_COLOR_FormatCbYCrY;
+                        ALOGE("%s: In kMetadataBufferTypeGrallocSource usage, the input color format is OMX_COLOR_FormatCbYCrY (after CSC).", hComponent->ComponentName);
+                    }
+                }
+                else
+                {
+                    pComponentConfigStructure.format = OMX_COLOR_FormatYUV420SemiPlanar;
+                    ALOGE("%s: In kMetadataBufferTypeGrallocSource usage, the input color format is OMX_COLOR_FormatYUV420SemiPlanar (after CSC).", hComponent->ComponentName);
+                }
+
+                error = pComponent->StandardComp.SetConfig(pComponent, OMX_IndexConfigMarvellStoreMetaData, &pComponentConfigStructure);
+                if( error != OMX_ErrorNone )
+                {
+                    ALOGE("%s, SetConfig OMX_IndexConfigMarvellStoreMetaData failed, error = 0x%x", hComponent->ComponentName);
+                    return error;
+                }
+
+                if( pstruc->memHeap.get() == NULL )
+                {
+                    if( pComponentConfigStructure.format == OMX_COLOR_FormatCbYCrY )
+                        size = 2 * _ALIGN(pComponentConfigStructure.width, 16) * _ALIGN(pComponentConfigStructure.height, 16);
+                    else if( pComponentConfigStructure.format == OMX_COLOR_FormatYUV420SemiPlanar )
+                        size = 3 * _ALIGN(pComponentConfigStructure.width, 16) * _ALIGN(pComponentConfigStructure.height, 16) / 2;
+                    else
+                    {
+                        ALOGE("%s: Unsupported target csc color format: %d", hComponent->ComponentName, pComponentConfigStructure.format);
+                        return OMX_ErrorNotImplemented;
+                    }
+                }
+                android::sp<android::MemoryHeapBase> memHeap = new android::MemoryHeapBase("/dev/ion", size, android::MemoryHeapBase::PHYSICALLY_CONTIGUOUS|android::MemoryHeapBase::NO_CACHING);
+                contextData.version = memHeap.get();
+
+
+            }
+        }
+
+    }
+    if( buffer[0] )
+    {
+       ALOGE("Unsupported StoreMetaDataInVideoBuffers usage type: %d", buffer[0]);
+       return OMX_ErrorNotImplemented;
+    }
+}
 
 static OMX_ERRORTYPE IppOMXWrapper_GetParameter(
         OMX_IN  OMX_HANDLETYPE hComponent,
@@ -135,7 +414,7 @@ static OMX_ERRORTYPE IppOMXWrapper_GetParameter(
    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
    }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+   IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
    return pComponent->StandardComp.GetParameter(pComponent, nParamIndex, pComponentParameterStructure);
 }
@@ -152,21 +431,29 @@ static OMX_ERRORTYPE IppOMXWrapper_SetParameter(
         return OMX_ErrorInvalidComponent;
     }
     OMX_ERRORTYPE res;
-    IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
-    unsigned char *name = ((IppOmxCompomentWrapper_t*)hComponent)->ComponentName;
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
+    unsigned char *name = component->ComponentName;
+    int32_t *InParam = (int32_t*)pComponentParameterStructure;
+    int32_t params[4];
 
     if( nIndex != OMX_IndexParamMarvellStoreMetaInOutputBuff )
         return pComponent->StandardComp.SetParameter(pComponent, nIndex, pComponentParameterStructure);
 
-    if( *((int*)pComponentParameterStructure + 2) )
+    if( InParam[2] )
     {
         ALOGI("%s: currently we do not support StoreMetaDataInOutputBuffers usage.", name);
         return OMX_ErrorNotImplemented;
     }
 
-    ((IppOmxCompomentWrapper_t*)hComponent)->field_E4 = *((int*)pComponentParameterStructure + 3);
+    component->field_E4 = InParam[3];
 
-    res = pComponent->StandardComp.SetParameter(pComponent, (OMX_INDEXTYPE)OMX_IndexParamMarvellStoreMetaInOutputBuff, pComponentParameterStructure);
+    params[0] = InParam[0];
+    params[1] = InParam[1];
+    params[2] = InParam[2];
+    params[3] = InParam[3];
+
+    res = pComponent->StandardComp.SetParameter(pComponent, (OMX_INDEXTYPE)OMX_IndexParamMarvellStoreMetaInOutputBuff, params);
     if( res != OMX_ErrorNone )
     {
         ALOGE("%s: SetParameter OMX_IndexParamMarvellStoreMetaData failed, error = 0x%x", name, res);
@@ -185,7 +472,7 @@ static OMX_ERRORTYPE IppOMXWrapper_GetConfig(
    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
    }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+   IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
    return pComponent->StandardComp.GetConfig(pComponent, nIndex, pComponentConfigStructure);
 }
@@ -201,7 +488,7 @@ static OMX_ERRORTYPE IppOMXWrapper_SetConfig(
    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
    }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+   IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
    return pComponent->StandardComp.SetConfig(pComponent, nIndex, pComponentConfigStructure);
 }
@@ -216,7 +503,7 @@ static OMX_ERRORTYPE IppOMXWrapper_GetExtensionIndex(
    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
    }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+   IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
    return pComponent->StandardComp.GetExtensionIndex(pComponent, cParameterName, pIndexType);
 }
@@ -230,21 +517,22 @@ static OMX_ERRORTYPE IppOMXWrapper_UseBuffer(
         OMX_IN OMX_U8* pBuffer){
     if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+    }
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
     OMX_ERRORTYPE error;
 
     error = pComponent->StandardComp.UseBuffer(pComponent, ppBufferHdr, nPortIndex, pAppPrivate, nSizeBytes, pBuffer);
 
-    if( error == OMX_ErrorNone && ((IppOmxCompomentWrapper_t*)hComponent)->field_E4 == 1 && !nPortIndex )
+    if( error == OMX_ErrorNone && component->field_E4 == 1 && !nPortIndex )
     {
-        int *numBuffer = &((IppOmxCompomentWrapper_t*)hComponent)->numBuffers;
-        if( *numBuffer < 32 )
+        int numBuffer = component->numBuffers;
+        if( numBuffer < 32 )
         {
-            struc_1 *buffer = &((IppOmxCompomentWrapper_t*)hComponent)->buffers[*numBuffer];
+            struc_1 *buffer = &component->buffers[numBuffer];
             buffer->pBuffer = *ppBufferHdr;
             memcpy(&buffer->bufferHeader, *ppBufferHdr, 0x50);
-            ++*numBuffer;
+            ++component->numBuffers;
             error = OMX_ErrorNone;
         }
         else
@@ -266,17 +554,34 @@ static OMX_ERRORTYPE IppOMXWrapper_AllocateBuffer(
         OMX_IN OMX_U32 nPortIndex,
         OMX_IN OMX_PTR pAppPrivate,
         OMX_IN OMX_U32 nSizeBytes){
-    OMX_COMPONENTTYPE *hWrapperHandle = NULL;
     OMX_ERRORTYPE error = OMX_ErrorNone;
 
     if (hComponent == NULL){
          return OMX_ErrorInvalidComponent;
     }
-    hWrapperHandle = (OMX_COMPONENTTYPE*)(&(((IppOmxCompomentWrapper_t*)hComponent)->StandardComp));
-    //OMX_GetComponentVersion(hWrapperHandle->pComponentPrivate, ComponentName, &ComponentVersion, &SpecVersion, NULL);
-    MARVELL_LOG("%s : OMX_AllocateBuffer port=%d size=%u", ((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, nPortIndex, nSizeBytes);
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
-     return OMX_AllocateBuffer(hWrapperHandle->pComponentPrivate, ppBuffer, nPortIndex, pAppPrivate, nSizeBytes);
+    error = pComponent->StandardComp.AllocateBuffer(pComponent, ppBuffer, nPortIndex, pAppPrivate, nSizeBytes);
+    if( error == OMX_ErrorNone && component->field_E4 == 1 && !nPortIndex )
+    {
+        int numBuffers = component->numBuffers;
+        if( numBuffers < 32 )
+        {
+            struc_1 *pstruc = &component->buffers[numBuffers];
+            pstruc->pBuffer = *ppBuffer;
+            memcpy(&pstruc->bufferHeader, *ppBuffer, 0x50);
+            ++component->numBuffers;
+            error = OMX_ErrorNone;
+        }
+        else
+        {
+            ALOGE("Input port buffer count exceeds max count %d, please check!", 32);
+            error = OMX_ErrorInsufficientResources;
+        }
+    }
+
+    return error;
 }
 
 /** refer to OMX_FreeBuffer in OMX_core.h or the OMX IL
@@ -287,19 +592,61 @@ static OMX_ERRORTYPE IppOMXWrapper_FreeBuffer(
         OMX_IN  OMX_HANDLETYPE hComponent,
         OMX_IN  OMX_U32 nPortIndex,
         OMX_IN  OMX_BUFFERHEADERTYPE* pBuffer){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
-   if (hComponent == NULL){
+    OMX_ERRORTYPE error = OMX_ErrorNone;
+    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   }
-   hWrapperHandle = (OMX_COMPONENTTYPE*)(&(((IppOmxCompomentWrapper_t*)hComponent)->StandardComp));
+    }
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
+    struc_1 *pstruc;
 
-   MARVELL_LOG("%s: OMX_FreeBuffer: port %lu , ptr: %p",((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, nPortIndex,pBuffer->pBuffer);
-   error = OMX_FreeBuffer(hWrapperHandle->pComponentPrivate, nPortIndex, pBuffer);
-   if (error != OMX_ErrorNone){
-        ALOGE("%s: OMX_FreeBuffer Failed: port %lu , ptr: %p",((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, nPortIndex, pBuffer->pBuffer);
-   }
-   return error;
+    error = pComponent->StandardComp.FreeBuffer(pComponent, nPortIndex, pBuffer);
+    if( error != OMX_ErrorNone )
+    {
+        ALOGE("%s: OMX_FreeBuffer Failed: port %lu , ptr: %p", component->ComponentName, nPortIndex, pBuffer->pBuffer);
+        return error;
+    }
+
+    if( component->field_E4 != 1 || nPortIndex )
+        return error;
+
+    for( int i = 0; i < 32; ++i )
+    {
+        pstruc = &component->buffers[i];
+        if( pstruc->pBuffer == pBuffer )
+            break;
+        if( i == 31 )
+        {
+            ALOGE("Could not find backup input port buffer header!");
+            return OMX_ErrorUndefined;
+        }
+    }
+
+    pstruc->pBuffer = NULL;
+    if( pstruc->surface )
+    {
+        if( component->context == NULL )
+        {
+            ALOGE("Invalid GCU context.");
+            return OMX_ErrorHardware;
+        }
+        _gcuDestroyBuffer(component->context, pstruc->surface);
+        pstruc->surface = NULL;
+    }
+
+    if( pstruc->memHeap.get() )
+    {
+        pstruc->memHeap = NULL;
+        pstruc->field_60 = 0;
+        pstruc->field_64 = 0;
+        pstruc->field_6C = 0;
+        pstruc->surface = NULL;
+    }
+    memset(&pstruc->bufferHeader, 0, sizeof(OMX_BUFFERHEADERTYPE));
+    error = OMX_ErrorNone;
+    --component->numBuffers;
+
+    return error;
 }
 
 /** refer to OMX_EmptyThisBuffer in OMX_core.h or the OMX IL
@@ -310,93 +657,75 @@ static OMX_ERRORTYPE IppOMXWrapper_EmptyThisBuffer(
         OMX_IN  OMX_HANDLETYPE hComponent,
         OMX_IN  OMX_BUFFERHEADERTYPE* pBuffer){
 
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
+    OMX_ERRORTYPE error = OMX_ErrorNone;
 
-   //if (hComponent == NULL){
+    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   //}
-   /*
-   hWrapperHandle = (OMX_COMPONENTTYPE*)(&(((IppOmxCompomentWrapper_t*)hComponent)->StandardComp));
+    }
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
-#ifdef USE_ION
-   if (!strcmp((char*)((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, "OMX.MARVELL.VIDEO.VMETAENCODER")  ||
-       !strcmp((char*)((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, "OMX.MARVELL.VIDEO.CODADX8ENCODER")) {
-       if (pBuffer->pInputPortPrivate) {
-           android::IMemory *mem = (android::IMemory*)(pBuffer->pInputPortPrivate);
-           android::sp<android::IMemoryHeap> heap = mem->getMemory();
-           void *va_base = NULL;
-           OMX_S32 offset;
-           int fd, ret;
-           fd = open("/dev/ion", O_RDWR);
-           if (fd < 0) {
-               ALOGE("failed to open /dev/ion, ret:%d", fd);
-               goto out;
-           }
+    if( component->field_E4 == 1 )
+    {
+        if( pBuffer->nFilledLen )
+        {
+            error = storeMetaDataInBufferHandling(component, (OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer);
+            if( error != OMX_ErrorNone )
+            {
+                ALOGE("%s, storeMetaDataInBufferHandling() failed, error = 0x%x", component->ComponentName, error);
+                return error;
+            }
+        }
+    }
 
-           // import buffer fd to get handle
-           struct ion_fd_data req_fd;
-           memset(&req_fd, 0, sizeof(struct ion_fd_data));
-           req_fd.fd = heap->getHeapID();
-           ret = ioctl(fd, ION_IOC_IMPORT, &req_fd);
-           if (ret < 0) {
-               ALOGE("failed to import buffer fd:%d, ret:%d", req_fd.fd, ret);
-               close(fd);
-               goto out;
-           }
-           // fetch physical address
-           struct ion_custom_data data;
-           struct ion_pxa_region ion_region;
-           memset(&ion_region, 0, sizeof(ion_pxa_region));
-           memset(&data, 0, sizeof(struct ion_custom_data));
-           ion_region.handle = req_fd.handle;
-           data.cmd = ION_PXA_PHYS;
-           data.arg = (unsigned long)&ion_region;
-           ret = ioctl(fd, ION_IOC_CUSTOM, &data);
-           if (ret < 0) {
-               ALOGE("failed to get physical address from ION, return error:%d", ret);
-               close(fd);
-               goto out;
-           }
-           close(fd);
-           va_base = heap->getBase();
-           offset = pBuffer->pBuffer + pBuffer->nOffset - (OMX_U8*)va_base;
-           ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = offset + ion_region.addr;
-           ALOGD("%s(%d): nPhyAddr=%p\n", __FUNCTION__, __LINE__, ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr);
-       }
-   }
-   return OMX_EmptyThisBuffer(hWrapperHandle->pComponentPrivate, pBuffer);
-out:
-   ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = 0;
-   ALOGE("The Physical address for HW encoder is illegal NULL");
-   return OMX_EmptyThisBuffer(hWrapperHandle->pComponentPrivate, pBuffer);
-#else
-   if (!strcmp((char*)((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, "OMX.MARVELL.VIDEO.VMETAENCODER")  ||
-       !strcmp((char*)((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, "OMX.MARVELL.VIDEO.CODADX8ENCODER")) {
-       if (pBuffer->pInputPortPrivate) {
-           android::IMemory *mem = (android::IMemory*)(pBuffer->pInputPortPrivate);
-           android::sp<android::IMemoryHeap> heap = mem->getMemory();
-           void* va_base;
-           OMX_S32 offset;
-           struct pmem_region region;
-           va_base = heap->getBase();
-           if(ioctl(heap->getHeapID(), PMEM_GET_PHYS, &region) == 0) {
-               offset = pBuffer->pBuffer + pBuffer->nOffset - (OMX_U8*)va_base;
-               ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = (OMX_U32)(region.offset + offset);
-               //ALOGD("%s(%d): pa_base=%p va_base=%p pBuffer=%p offset=%d\n", __FUNCTION__, __LINE__, region.offset, va_base, pBuffer->pBuffer, offset);
-           } else {
-               ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = 0;
-               ALOGE("The Physical address for HW encoder is illegal NULL");
-           }
-           ALOGD("%s(%d): nPhyAddr=%p\n", __FUNCTION__, __LINE__, ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr);
-       }
-   }
+    if( pBuffer->pInputPortPrivate )
+    {
+        android::IMemory *mem = (android::IMemory*)(pBuffer->pInputPortPrivate);
+        android::sp<android::IMemoryHeap> heap = mem->getMemory();
+        int fd = heap->getHeapID();
+        int note;
+        int err;
 
-   //OMX_GetComponentVersion(hWrapperHandle->pComponentPrivate, ComponentName, &ComponentVersion, &SpecVersion, NULL);
-   MARVELL_ALOG("%s: OMX_EmptyThisBuffer ",((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, );
-   return OMX_EmptyThisBuffer(hWrapperHandle->pComponentPrivate, pBuffer);
-#endif
-*/
+        if( strncmp((const char*)component->ComponentName, "OMX.MARVELL.VIDEO.HW", 20) )
+            note = ION_HEAP_TYPE_DMA;
+        else
+            note = ION_HEAP_TYPE_SYSTEM_CONTIG;
+
+        err = mvmem_set_usage(fd, note);
+        if( err < 0 )
+        {
+            ALOGE("failed to set buffer usage through mvmem, return error:%d", err);
+            return OMX_ErrorHardware;
+        }
+    }
+
+    if( !strcmp((const char*)component->ComponentName, "OMX.MARVELL.VIDEO.HW.CODA7542ENCODER")
+     || !strcmp((const char*)component->ComponentName, "OMX.MARVELL.VIDEO.HW.HANTROENCODER") )
+    {
+        android::IMemory *mem = (android::IMemory*)(pBuffer->pInputPortPrivate);
+        if( mem )
+        {
+            android::sp<android::IMemoryHeap> heap = mem->getMemory();
+            int fd = heap->getHeapID();
+            int err;
+            uint32_t dmaaddr;
+            void *va_base;
+            OMX_S32 offset;
+            err = mvmem_get_dma_addr(fd, &dmaaddr);
+            if( err >= 0 )
+            {
+                ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = offset + dmaaddr;
+            }
+            else
+            {
+                ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = 0;
+                ALOGE("failed to get physical address through mvmem, return error:%d", err);
+                ALOGE("The Physical address for HW encoder is illegal NULL");
+            }
+        }
+    }
+
+    return pComponent->StandardComp.EmptyThisBuffer(pComponent, pBuffer);
 }
 
 /** refer to OMX_FillThisBuffer in OMX_core.h or the OMX IL
@@ -406,14 +735,12 @@ out:
 static OMX_ERRORTYPE IppOMXWrapper_FillThisBuffer(
         OMX_IN  OMX_HANDLETYPE hComponent,
         OMX_IN  OMX_BUFFERHEADERTYPE* pBuffer){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
-
-   if (hComponent == NULL){
+    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
-   return pComponent->StandardComp.FillThisBuffer(hWrapperHandle->pComponentPrivate, pBuffer);
+    }
+
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
+    return pComponent->StandardComp.FillThisBuffer(pComponent, pBuffer);
 }
 
 static OMX_ERRORTYPE IppOMXWrapper_GetComponentVersion(
@@ -422,12 +749,10 @@ static OMX_ERRORTYPE IppOMXWrapper_GetComponentVersion(
         OMX_OUT OMX_VERSIONTYPE* pComponentVersion,
         OMX_OUT OMX_VERSIONTYPE* pSpecVersion,
         OMX_OUT OMX_UUIDTYPE* pComponentUUID){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
     if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
     }
-    IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
     return pComponent->StandardComp.GetComponentVersion(pComponent, pComponentName,pComponentVersion, pSpecVersion, pComponentUUID);
 }
@@ -440,14 +765,14 @@ static OMX_ERRORTYPE IppOMXWrapper_SendCommand(
         OMX_IN  OMX_COMMANDTYPE Cmd,
         OMX_IN  OMX_U32 nParam1,
         OMX_IN  OMX_PTR pCmdData){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   if (hComponent == NULL){
+    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+    }
+    IppOmxCompomentWrapper_t *component = IPPOMX_COMPONENT(hComponent);
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
-   ALOGD("%s: OMX_SendCommand: cmd: %d, nParam1: %lu ",((IppOmxCompomentWrapper_t*)hComponent)->ComponentName, Cmd, nParam1);
-   return pComponent->StandardComp.SendCommand(hWrapperHandle->pComponentPrivate, Cmd, nParam1, pCmdData);
+    ALOGD("%s: OMX_SendCommand: cmd: %d, nParam1: %lu ", component->ComponentName, Cmd, nParam1);
+    return pComponent->StandardComp.SendCommand(pComponent, Cmd, nParam1, pCmdData);
 }
 
 /** refer to OMX_GetState in OMX_core.h or the OMX IL
@@ -456,14 +781,12 @@ static OMX_ERRORTYPE IppOMXWrapper_SendCommand(
 static OMX_ERRORTYPE IppOMXWrapper_GetState(
         OMX_IN  OMX_HANDLETYPE hComponent,
         OMX_OUT OMX_STATETYPE* pState){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
     if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
     }
-    IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
-    return pComponent->StandardComp.GetState(hWrapperHandle->pComponentPrivate, pState);
+    return pComponent->StandardComp.GetState(pComponent, pState);
 }
 
 /** @ingroup buf */
@@ -473,27 +796,22 @@ static OMX_ERRORTYPE IppOMXWrapper_UseEGLImage(
         OMX_IN OMX_U32 nPortIndex,
         OMX_IN OMX_PTR pAppPrivate,
         OMX_IN void* eglImage){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
-   if (hComponent == NULL){
+    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
-   }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+    }
+    IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
-   return pComponent->StandardComp.UseEGLImage(pComponent, ppBufferHdr,nPortIndex,pAppPrivate,eglImage);
+    return pComponent->StandardComp.UseEGLImage(pComponent, ppBufferHdr,nPortIndex,pAppPrivate,eglImage);
 }
+
 static     OMX_ERRORTYPE IppOMXWrapper_ComponentRoleEnum(
         OMX_IN OMX_HANDLETYPE hComponent,
         OMX_OUT OMX_U8 *cRole,
         OMX_IN OMX_U32 nIndex){
-   OMX_COMPONENTTYPE *hWrapperHandle = NULL;
-   OMX_ERRORTYPE error = OMX_ErrorNone;
-   OMX_COMPONENTTYPE *hInternalComp = NULL;
-
    if (hComponent == NULL){
         return OMX_ErrorInvalidComponent;
    }
-   IppOmxCompomentWrapper_t *pComponent = (IppOmxCompomentWrapper_t*)((IppOmxCompomentWrapper_t*)hComponent)->StandardComp.pComponentPrivate;
+   IppOmxCompomentWrapper_t *pComponent = IPPOMX_PCOMPONENT(hComponent);
 
 
    return pComponent->StandardComp.ComponentRoleEnum(pComponent, cRole, nIndex);
@@ -506,11 +824,12 @@ static OMX_ERRORTYPE IppOMXWrapper_EventHandler(
         OMX_IN OMX_U32 nData1,
         OMX_IN OMX_U32 nData2,
         OMX_IN OMX_PTR pEventData){
-   IppOmxCompomentWrapper_t *hWrapperHandle = (IppOmxCompomentWrapper_t*)((OMX_COMPONENTTYPE*)hComponent)->pApplicationPrivate;
+   IppOmxCompomentWrapper_t *hWrapperHandle = IPPOMX_PAPPLICATION(hComponent);
    OMX_ERRORTYPE error;
    if (hWrapperHandle == NULL){
         return OMX_ErrorInvalidComponent;
    }
+
    error = hWrapperHandle->InternalCallBack.EventHandler(hWrapperHandle, pAppData, eEvent, nData1, nData2, pEventData);
    ALOGD("%s: Event: %d, nData1: %lu, nData2: %lu",hWrapperHandle->ComponentName, eEvent, nData1, nData2);
 
@@ -522,12 +841,12 @@ static OMX_ERRORTYPE IppOMXWrapper_EmptyBufferDone(
         OMX_IN OMX_HANDLETYPE hComponent,
         OMX_IN OMX_PTR pAppData,
         OMX_IN OMX_BUFFERHEADERTYPE* pBuffer){
-   IppOmxCompomentWrapper_t *hWrapperHandle = (IppOmxCompomentWrapper_t*)((OMX_COMPONENTTYPE*)hComponent)->pApplicationPrivate;
+   IppOmxCompomentWrapper_t *hWrapperHandle = IPPOMX_PAPPLICATION(hComponent);
    OMX_ERRORTYPE error;
 
-   if (hWrapperHandle == NULL){
+    if (hWrapperHandle == NULL){
         return OMX_ErrorInvalidComponent;
-   }
+    }
 
     if ( hWrapperHandle->field_E4 == 1 )
     {
@@ -548,7 +867,6 @@ static OMX_ERRORTYPE IppOMXWrapper_EmptyBufferDone(
         pBuffer->nOffset   = buffers->bufferHeader.nOffset;
     }
 
-   MARVELL_LOG("%s: EmptyBufferDone ", hWrapperHandle->ComponentName);
    return hWrapperHandle->InternalCallBack.EmptyBufferDone(hWrapperHandle, pAppData, pBuffer);
 }
 
@@ -557,19 +875,19 @@ static OMX_ERRORTYPE IppOMXWrapper_FillBufferDone(
         OMX_OUT OMX_HANDLETYPE hComponent,
         OMX_OUT OMX_PTR pAppData,
         OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer){
-   IppOmxCompomentWrapper_t *hWrapperHandle = (IppOmxCompomentWrapper_t*)((OMX_COMPONENTTYPE*)hComponent)->pApplicationPrivate;
+   IppOmxCompomentWrapper_t *hWrapperHandle = IPPOMX_PAPPLICATION(hComponent);
    OMX_ERRORTYPE error;
     if (hWrapperHandle == NULL){
         return OMX_ErrorInvalidComponent;
     }
-    MARVELL_LOG("%s: FillBufferDone", hWrapperHandle->ComponentName);
+
     return hWrapperHandle->InternalCallBack.FillBufferDone(hWrapperHandle, pAppData, pBuffer);
 }
 
 
 static OMX_ERRORTYPE _OMX_MasterInit()
 {
-    return libMrvlOmx.OMX_Init();
+    return OMX_Init();
 }
 
 /***************************************************************************
@@ -587,7 +905,7 @@ static OMX_ERRORTYPE _OMX_MasterInit()
 *****************************************************************************/
 static OMX_ERRORTYPE _OMX_MasterDeinit()
 {
-    return libMrvlOmx.OMX_Deinit();
+    return OMX_Deinit();
 }
 
 /***************************************************************************
@@ -630,14 +948,13 @@ static OMX_ERRORTYPE _OMX_MasterGetHandle(
     WrapperCallBack.FillBufferDone  = IppOMXWrapper_FillBufferDone;
     WrapperCallBack.EventHandler    = IppOMXWrapper_EventHandler;
 
-
     pWrapperHandle = (IppOmxCompomentWrapper_t*)malloc(sizeof(IppOmxCompomentWrapper_t));
     if (!pWrapperHandle) {
         return OMX_ErrorInsufficientResources;
     }
 
     memset(pWrapperHandle, 0, sizeof(IppOmxCompomentWrapper_t));
-    error = libMrvlOmx.OMX_GetHandle(&pOmxInternalHandle, cComponentName, pAppData, &WrapperCallBack);
+    error = OMX_GetHandle(&pOmxInternalHandle, cComponentName, pAppData, &WrapperCallBack);
     if (error == OMX_ErrorNone){
         *pHandle = (OMX_HANDLETYPE)pWrapperHandle;
         /*override function*/
@@ -668,30 +985,30 @@ static OMX_ERRORTYPE _OMX_MasterGetHandle(
 
         for( int i = 0; i < 32; ++i )
         {
-            int **x = (int**)pWrapperHandle->buffers[i].id;
-            if( x )
-                ; // android::RefBase::decStrong((char*)x + *(*x-3), x);
-            memset(&pWrapperHandle->buffers[i].bufferHeader, 0, sizeof(int)*20);
-            pWrapperHandle->buffers[i].id = 0;
+            pWrapperHandle->buffers[i].pBuffer = NULL;
+            pWrapperHandle->buffers[i].field_4 = 0;
+            pWrapperHandle->buffers[i].memHeap = NULL;
+            memset(&pWrapperHandle->buffers[i].bufferHeader, 0, sizeof(OMX_BUFFERHEADERTYPE));
             pWrapperHandle->buffers[i].field_5C = 0;
             pWrapperHandle->buffers[i].field_60 = 0;
             pWrapperHandle->buffers[i].field_64 = 0;
-            pWrapperHandle->buffers[i].field_68 = 0;
+            pWrapperHandle->buffers[i].surface = NULL;
+            pWrapperHandle->buffers[i].field_6C = 0;
         }
 
         ((OMX_COMPONENTTYPE*)pOmxInternalHandle)->pApplicationPrivate = pWrapperHandle;
-        pWrapperHandle->StandardComp.pComponentPrivate        = pOmxInternalHandle;
+        pWrapperHandle->StandardComp.pComponentPrivate = pOmxInternalHandle;
         strncpy((char*)pWrapperHandle->ComponentName, cComponentName, 128);
 
     if (!strcmp(cComponentName, "OMX.MARVELL.AUDIO.AACENCODER")) {
-    /*config aac encoder to output specific data for stagefright-based camcorder*/
-    OMX_AUDIO_PARAM_MARVELL_AACENC par;
-            par.nSize         	= sizeof(OMX_AUDIO_PARAM_MARVELL_AACENC);
-        par.nVersion.nVersion  	= 1;
-            par.nPortIndex    	= 1;
-            par.bOutputSpecificData = OMX_TRUE;
-            error = ((OMX_COMPONENTTYPE*)pOmxInternalHandle)->SetParameter(pOmxInternalHandle, (OMX_INDEXTYPE)OMX_IndexParamMarvellAACEnc, &par);
-        }
+        /*config aac encoder to output specific data for stagefright-based camcorder*/
+        OMX_AUDIO_PARAM_MARVELL_AACENC par;
+        par.nSize         	    = sizeof(OMX_AUDIO_PARAM_MARVELL_AACENC);
+        par.nVersion.nVersion   = 1;
+        par.nPortIndex    	    = 1;
+        par.bOutputSpecificData = OMX_TRUE;
+        error = ((OMX_COMPONENTTYPE*)pOmxInternalHandle)->SetParameter(pOmxInternalHandle, (OMX_INDEXTYPE)OMX_IndexParamMarvellAACEnc, &par);
+    }
 
     if (!strcmp(cComponentName, "OMX.MARVELL.VIDEO.VMETADECODER")) {
         OMX_VIDEO_PARAM_MARVELL_VMETADEC par;
@@ -760,12 +1077,12 @@ static OMX_ERRORTYPE _OMX_MasterFreeHandle(
 
     if( hWrapperHandle->context)
     {
-        libgcu.gcuDestroyContext(&hWrapperHandle->context);
-        libgcu.gcuTerminate();
+        gcuDestroyContext(&hWrapperHandle->context);
+        gcuTerminate();
         hWrapperHandle->context = 0;
     }
 
-    error = libMrvlOmx.OMX_FreeHandle((OMX_HANDLETYPE)hWrapperHandle->StandardComp.pComponentPrivate);
+    error = OMX_FreeHandle((OMX_HANDLETYPE)hWrapperHandle->StandardComp.pComponentPrivate);
 
     free(hWrapperHandle);
 
@@ -794,7 +1111,7 @@ static OMX_ERRORTYPE _OMX_MasterComponentNameEnum(
     OMX_IN  OMX_U32 nNameLength,
     OMX_IN  OMX_U32 nIndex)
 {
-    return libMrvlOmx.OMX_ComponentNameEnum(cComponentName, nNameLength, nIndex);
+    return OMX_ComponentNameEnum(cComponentName, nNameLength, nIndex);
 }
 
 /***************************************************************************
@@ -860,8 +1177,7 @@ static OMX_ERRORTYPE _OMX_MasterGetRolesOfComponent (
     OMX_OUT     OMX_U8 **roles)
 {
 
-    return libMrvlOmx.OMX_GetRolesOfComponent(compName, pNumRoles, roles);
-
+    return OMX_GetRolesOfComponent(compName, pNumRoles, roles);
 }
 
 static OMX_ERRORTYPE _OMX_MasterGetComponentsOfRole (
@@ -957,6 +1273,8 @@ OMX_ERRORTYPE OMXMRVLCodecsPlugin::getRolesOfComponent(
 
     return OMX_ErrorNone;
 }
+
+
 
 }  // namespace android
 

@@ -62,7 +62,8 @@ extern "C" {
 #define     OMX_IndexParamMarvellAACDec             0xFF000015 /**< reference: OMX_VIDEO_PARAM_MARVELL_AACENC */
 #define     OMX_IndexParamMarvellAACEnc             0xFF000016 /**< reference: OMX_VIDEO_PARAM_MARVELL_AACENC */
 
-#define     OMX_IndexParamMarvellStoreMetaInOutputBuff 0xFF000024
+#define     OMX_IndexParamMarvellStoreMetaInOutputBuff ((OMX_INDEXTYPE)0xFF000024)
+#define     OMX_IndexConfigMarvellStoreMetaData     ((OMX_INDEXTYPE)0xFF000025)
 
 #define		OMX_IndexParamMarvellInputMode			0xFF100000	/**< reference: OMX_OTHER_PARAM_MARVELL_INPUTMODETYPE */
 #define		OMX_IndexParamMarvellUseSourceBuffer	0xFF100001/**< reference: OMX_OTHER_PARAM_MARVELL_USESOURCEBUFFERTYPE */
@@ -242,6 +243,7 @@ typedef struct OMX_VIDEO_PARAM_MARVELL_VMETADEC{
     OMX_U32         nAdvanAVSync;   /*0x1: enable advanced av sync only for 1080p, 0x3 enable for 1080p&720p*/
     OMX_S32         nThreOffset;    /*advanced av sync parameter, [-3, 0], nThreOffset+FrameRate is target fps*/
     OMX_BOOL        bSetMinDisBufNum;  /*OMX_TRUE or OMX_FALSE. OMX client set this flag to TRUE to make Vmeta IL alloc minimum pic buffer*/
+    OMX_S32         unknown; // This structure is 40bytes long
 } OMX_VIDEO_PARAM_MARVELL_VMETADEC;
 
 /* Vmeta Decoder DRM Parameter Structure Name is "OMX.Marvell.index.param.VmetaDRM" */
@@ -318,8 +320,8 @@ typedef enum OMX_IMAGE_INTERPOLATIONTYPE {
 typedef struct _OMX_BUFFERHEADERTYPE_IPPEXT {
     OMX_BUFFERHEADERTYPE    bufheader;
     OMX_U32                 nPhyAddr;
-    OMX_BOOL                bAllocBufInternal;      /*to differentiate internally or externally allocating buffer*/
     OMX_U32                 nExtFlags;              /*extension flags*/
+    OMX_BOOL                bAllocBufInternal;      /*to differentiate internally or externally allocating buffer*/
 }OMX_BUFFERHEADERTYPE_IPPEXT;
 
 #ifdef __cplusplus

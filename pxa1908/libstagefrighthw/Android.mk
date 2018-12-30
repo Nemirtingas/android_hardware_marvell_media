@@ -17,17 +17,19 @@
 LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
-LOCAL_C_INCLUDES += hardware/marvell/pxa1908/original-kernel-headers
+LOCAL_C_INCLUDES += \
+    hardware/marvell/pxa1908/original-kernel-headers \
+    hardware/marvell/display/pxa1908/libgralloc \
+    hardware/marvell/libprebuilt/pxa1908/libGAL/include
 
 ifeq ($(shell if [ $(PLATFORM_SDK_VERSION) -ge 9 ]; then echo big9; fi),big9)
 LOCAL_C_INCLUDES += $(JNI_H_INCLUDE) \
-    frameworks/native/include/media/openmax\
     frameworks/native/include/media/hardware\
     frameworks/av/include\
-    hardware/marvell/media/libstagefrighthw/renderer\
-    hardware/marvell/media/ipplib/openmax/include\
     frameworks/base/include/binder\
-    frameworks/base/include/utils
+    frameworks/base/include/utils\
+    hardware/marvell/media/ipplib/openmax/include\
+    frameworks/native/include/media/openmax\
 
 LOCAL_CFLAGS += -DUSE_ION
 
@@ -36,8 +38,6 @@ else
 include external/opencore/Config.mk
 LOCAL_C_INCLUDES := $(PV_INCLUDES)
 LOCAL_CFLAGS := $(PV_CFLAGS_MINUS_VISIBILITY)
-
-LOCAL_CFLAGS += -DUSE_ION
 
 LOCAL_C_INCLUDES += $(JNI_H_INCLUDE) \
     $(TOP)/external/opencore/extern_libs_v2/khronos/openmax/include
@@ -64,20 +64,23 @@ endif
 LOCAL_SRC_FILES += \
         stagefright_mrvl_omx_plugin.cpp \
 
-LOCAL_SHARED_LIBRARIES :=       \
-        libbinder               \
-        libutils                \
-        libcutils               \
-        libstagefright_foundation
+LOCAL_SHARED_LIBRARIES :=        \
+        libbinder                \
+        libutils                 \
+        libcutils                \
+        libstagefright_foundation\
+        libgcu \
+        libmvmem \
+        libgpucsc \
 
 
-#ifeq ($(shell if [ $(PLATFORM_SDK_VERSION) -ge 9 ]; then echo big9; fi),big9)
-#LOCAL_SHARED_LIBRARIES += \
-#        libMrvlOmx
-#else
-#LOCAL_SHARED_LIBRARIES += \
-#        libMrvlOmxWrapper
-#endif
+ifeq ($(shell if [ $(PLATFORM_SDK_VERSION) -ge 9 ]; then echo big9; fi),big9)
+LOCAL_SHARED_LIBRARIES += \
+        libMrvlOmx
+else
+LOCAL_SHARED_LIBRARIES += \
+        libMrvlOmxWrapper
+endif
 
 ifeq ($(TARGET_OS)-$(TARGET_SIMULATOR),linux-true)
         LOCAL_LDLIBS += -lpthread -ldl
