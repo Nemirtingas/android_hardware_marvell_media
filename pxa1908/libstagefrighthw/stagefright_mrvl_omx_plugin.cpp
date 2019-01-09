@@ -148,7 +148,7 @@ struct libstock
     void *_lib;
     OMX_ERRORTYPE (*storeMetaDataInBufferHandling)(IppOmxCompomentWrapper_t *hComponent, OMX_BUFFERHEADERTYPE_IPPEXT *pBuffer);
 
-    libstock():_lib(dlopen("libstagefrighthw.so", RTLD_NOW))
+    libstock():_lib(dlopen("libstagefrighthw_stock.so", RTLD_NOW))
     {
         offset = (int)dlsym(_lib, "_ZN7android19OMXMRVLCodecsPlugin21makeComponentInstanceEPKcPK16OMX_CALLBACKTYPEPvPP17OMX_COMPONENTTYPE")-0x1ae8;
         *(int*)&storeMetaDataInBufferHandling = 0x2014 + offset;
@@ -393,7 +393,7 @@ extern OMX_ERRORTYPE storeMetaDataInBufferHandling(IppOmxCompomentWrapper_t *hCo
                     }
                 }
                 android::sp<android::MemoryHeapBase> memHeap = new android::MemoryHeapBase("/dev/ion", size, android::MemoryHeapBase::PHYSICALLY_CONTIGUOUS|android::MemoryHeapBase::NO_CACHING);
-                contextData.version = memHeap.get();
+
 
 
             }

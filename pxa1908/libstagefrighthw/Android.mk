@@ -28,7 +28,7 @@ LOCAL_C_INCLUDES += $(JNI_H_INCLUDE) \
     frameworks/av/include\
     frameworks/base/include/binder\
     frameworks/base/include/utils\
-    hardware/marvell/media/ipplib/openmax/include\
+    hardware/marvell/media/pxa1908/ipplib/openmax/include\
     frameworks/native/include/media/openmax\
 
 LOCAL_CFLAGS += -DUSE_ION
