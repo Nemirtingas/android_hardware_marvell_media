@@ -285,7 +285,7 @@ extern OMX_ERRORTYPE storeMetaDataInBufferHandling(IppOmxCompomentWrapper_t *hCo
             pBuffer->bufheader.nAllocLen = gcHandle->size;
             pBuffer->bufheader.nFilledLen = gcHandle->size;
             pBuffer->bufheader.nOffset = gcHandle->offset;
-            err = mvmem_get_dma_addr(gcHandle->master, &dmaAddr);
+            err = mvmem_get_dma_addr(gcHandle->master, (int*)&dmaAddr);
             if( err < 0 )
             {
                 ALOGE("failed to get VPUIO address through mvmem, return error:%d", err);
@@ -711,7 +711,7 @@ static OMX_ERRORTYPE IppOMXWrapper_EmptyThisBuffer(
             uint32_t dmaaddr;
             void *va_base;
             OMX_S32 offset;
-            err = mvmem_get_dma_addr(fd, &dmaaddr);
+            err = mvmem_get_dma_addr(fd, (int*)&dmaaddr);
             if( err >= 0 )
             {
                 ((OMX_BUFFERHEADERTYPE_IPPEXT*)pBuffer)->nPhyAddr = offset + dmaaddr;

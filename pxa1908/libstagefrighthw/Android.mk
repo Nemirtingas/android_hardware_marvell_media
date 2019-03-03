@@ -61,6 +61,10 @@ ifeq ($(ENABLE_MARVELL_DRMPLAY),true)
 LOCAL_CFLAGS += -D_MARVELL_DRM_PLAYER
 endif
 
+ifeq ($(BOARD_USE_MARVELL_ION),true)
+LOCAL_CFLAGS += -DUSE_MARVELL_ION
+endif
+
 LOCAL_SRC_FILES += \
         stagefright_mrvl_omx_plugin.cpp \
 
